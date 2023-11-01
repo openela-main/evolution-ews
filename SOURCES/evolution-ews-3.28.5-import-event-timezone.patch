@@ -1,0 +1,259 @@
+diff -up evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c.import-event-timezone evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c
+--- evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c.import-event-timezone	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c	2018-09-04 11:14:27.815647542 +0200
+@@ -579,7 +579,7 @@ ecb_ews_item_to_component_sync (ECalBack
+ 			if (start_zone != NULL) {
+ 				icalcomp = icalcomponent_get_first_component (vcomp, kind);
+ 
+-				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, vcomp, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 				dt = icaltime_convert_to_zone (dt, start_zone);
+ 				icalcomponent_set_dtstart (icalcomp, dt);
+ 
+@@ -587,7 +587,7 @@ ecb_ews_item_to_component_sync (ECalBack
+ 				e_timezone_cache_add_timezone (timezone_cache, start_zone);
+ 
+ 				if (end_zone != NULL) {
+-					dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
++					dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, vcomp, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
+ 					dt = icaltime_convert_to_zone (dt, end_zone);
+ 					icalcomponent_set_dtend (icalcomp, dt);
+ 
+@@ -655,11 +655,11 @@ ecb_ews_item_to_component_sync (ECalBack
+ 				zone = icaltimezone_get_builtin_timezone (tzid);
+ 
+ 			if (zone != NULL) {
+-				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, vcomp, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 				dt = icaltime_convert_to_zone (dt, zone);
+ 				icalcomponent_set_dtstart (icalcomp, dt);
+ 
+-				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
++				dt = e_cal_backend_ews_get_datetime_with_zone (timezone_cache, vcomp, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
+ 				dt = icaltime_convert_to_zone (dt, zone);
+ 				icalcomponent_set_dtend (icalcomp, dt);
+ 			}
+@@ -2930,7 +2930,7 @@ ecb_ews_send_cancellation_email_sync (EC
+ 	icalcomponent_add_property (vevent, icalproperty_new_status (ICAL_STATUS_CANCELLED));
+ 	prop = icalcomponent_get_first_property (vevent, ICAL_METHOD_PROPERTY);
+ 	if (prop != NULL) icalcomponent_remove_property (vevent, prop);
+-	dt = e_cal_backend_ews_get_datetime_with_zone (E_TIMEZONE_CACHE (cbews), vevent, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++	dt = e_cal_backend_ews_get_datetime_with_zone (E_TIMEZONE_CACHE (cbews), NULL, vevent, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 	icaltz = (icaltimezone *)
+ 		(dt.zone ? dt.zone : ecb_ews_get_timezone_from_ical_component (cbews, vevent));
+ 	vtz = icaltimezone_get_component (icaltz);
+@@ -2973,6 +2973,7 @@ ecb_ews_send_cancellation_email_sync (EC
+ 
+ static void
+ ecb_ews_receive_objects_no_exchange_mail (ECalBackendEws *cbews,
++					  icalcomponent *vcalendar,
+ 					  icalcomponent *subcomp,
+ 					  GSList **ids,
+ 					  GCancellable *cancellable,
+@@ -2984,6 +2985,7 @@ ecb_ews_receive_objects_no_exchange_mail
+ 	convert_data.connection = cbews->priv->cnc;
+ 	convert_data.timezone_cache = E_TIMEZONE_CACHE (cbews);
+ 	convert_data.icalcomp = subcomp;
++	convert_data.vcalendar = vcalendar;
+ 	convert_data.default_zone = icaltimezone_get_utc_timezone ();
+ 
+ 	fid = e_ews_folder_id_new (cbews->priv->folder_id, NULL, FALSE);
+@@ -3228,6 +3230,7 @@ ecb_ews_get_item_accept_id (ECalComponen
+ 
+ static gboolean
+ ecb_ews_do_method_request_publish_reply (ECalBackendEws *cbews,
++					 icalcomponent *vcalendar,
+ 					 ECalComponent *comp,
+ 					 icalcomponent *subcomp,
+ 					 const gchar *response_type,
+@@ -3258,7 +3261,7 @@ ecb_ews_do_method_request_publish_reply
+ 	while (pass < 2) {
+ 		/*in case we do not have item id we will create item with mime content only*/
+ 		if (!item_id || (response_type && g_ascii_strcasecmp (response_type, "NEEDS-ACTION") == 0)) {
+-			ecb_ews_receive_objects_no_exchange_mail (cbews, subcomp, &ids, cancellable, &local_error);
++			ecb_ews_receive_objects_no_exchange_mail (cbews, vcalendar, subcomp, &ids, cancellable, &local_error);
+ 		} else {
+ 			EwsCalendarConvertData convert_data = { 0 };
+ 
+@@ -3367,6 +3370,7 @@ ecb_ews_do_method_request_publish_reply
+ 			}
+ 
+ 			convert_data.timezone_cache = E_TIMEZONE_CACHE (cbews);
++			convert_data.vcalendar = vcalendar;
+ 
+ 			e_ews_connection_update_items_sync (
+ 				cbews->priv->cnc,
+@@ -3452,7 +3456,7 @@ ecb_ews_receive_objects_sync (ECalBacken
+ 
+ 			comp = e_cal_component_new_from_icalcomponent (icalcomponent_new_clone (subcomp));
+ 
+-			success = ecb_ews_do_method_request_publish_reply (cbews, comp, subcomp, response_type, user_email, rsvp_requested, cancellable, error);
++			success = ecb_ews_do_method_request_publish_reply (cbews, icalcomp, comp, subcomp, response_type, user_email, rsvp_requested, cancellable, error);
+ 
+ 			do_refresh = TRUE;
+ 
+diff -up evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.c.import-event-timezone evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.c
+--- evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.c.import-event-timezone	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.c	2018-09-04 11:16:58.892645453 +0200
+@@ -178,7 +178,8 @@ e_cal_backend_ews_tz_util_get_msdn_equiv
+ {
+ 	const gchar *msdn_tz_location = NULL;
+ 
+-	g_return_val_if_fail (ical_tz_location != NULL, NULL);
++	if (!ical_tz_location || !*ical_tz_location)
++		return NULL;
+ 
+ 	g_rec_mutex_lock (&tz_mutex);
+ 	if (ical_to_msdn == NULL) {
+@@ -199,7 +200,8 @@ e_cal_backend_ews_tz_util_get_ical_equiv
+ {
+ 	const gchar *ical_tz_location = NULL;
+ 
+-	g_return_val_if_fail (msdn_tz_location != NULL, NULL);
++	if (!msdn_tz_location || !*msdn_tz_location)
++		return NULL;
+ 
+ 	g_rec_mutex_lock (&tz_mutex);
+ 	if (msdn_to_ical == NULL) {
+@@ -1113,11 +1115,11 @@ convert_vevent_calcomp_to_xml (ESoapMess
+ 		e_ews_message_write_string_parameter (msg, "ReminderIsSet", NULL, "false");
+ 
+ 	/* start time, end time and meeting time zone */
+-	dtstart = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++	dtstart = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 	tzid_start = (icaltimezone *) (dtstart.zone ? dtstart.zone : convert_data->default_zone);
+ 	ical_location_start = icaltimezone_get_location (tzid_start);
+ 
+-	dtend = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
++	dtend = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
+ 	tzid_end = (icaltimezone *) (dtend.zone ? dtend.zone : convert_data->default_zone);
+ 	ical_location_end = icaltimezone_get_location (tzid_end);
+ 
+@@ -1272,7 +1274,7 @@ convert_vtodo_calcomp_to_xml (ESoapMessa
+ 
+ 	prop = icalcomponent_get_first_property (icalcomp, ICAL_DUE_PROPERTY);
+ 	if (prop) {
+-		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DUE_PROPERTY, icalproperty_get_due);
++		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DUE_PROPERTY, icalproperty_get_due);
+ 		e_ews_cal_utils_set_time (msg, "DueDate", &dt, TRUE);
+ 	}
+ 
+@@ -1285,7 +1287,7 @@ convert_vtodo_calcomp_to_xml (ESoapMessa
+ 
+ 	prop = icalcomponent_get_first_property (icalcomp, ICAL_DTSTART_PROPERTY);
+ 	if (prop) {
+-		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 		e_ews_cal_utils_set_time (msg, "StartDate", &dt, TRUE);
+ 	}
+ 
+@@ -1536,8 +1538,8 @@ convert_vevent_component_to_updatexml (E
+ 	}
+ 	/* Update other properties allowed only for meeting organizers*/
+ 	/*meeting dates*/
+-	dtstart = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+-	dtstart_old = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp_old, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++	dtstart = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++	dtstart_old = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp_old, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 	dt_start_changed = icaltime_compare (dtstart, dtstart_old) != 0;
+ 	if (dtstart.zone != NULL) {
+ 		tzid_start = (icaltimezone *) dtstart.zone;
+@@ -1548,8 +1550,8 @@ convert_vevent_component_to_updatexml (E
+ 			dt_start_changed_timezone_name = TRUE;
+ 	}
+ 
+-	dtend = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
+-	dtend_old = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp_old, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
++	dtend = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
++	dtend_old = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp_old, ICAL_DTEND_PROPERTY, icalproperty_get_dtend);
+ 	dt_end_changed = icaltime_compare (dtend, dtend_old) != 0;
+ 	if (dtend.zone != NULL) {
+ 		tzid_end = (icaltimezone *) dtend.zone;
+@@ -1768,7 +1770,7 @@ convert_vtodo_component_to_updatexml (ES
+ 
+ 	prop = icalcomponent_get_first_property (icalcomp, ICAL_DUE_PROPERTY);
+ 	if (prop) {
+-		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DUE_PROPERTY, icalproperty_get_due);
++		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DUE_PROPERTY, icalproperty_get_due);
+ 		e_ews_message_start_set_item_field (msg, "DueDate", "task", "Task");
+ 		e_ews_cal_utils_set_time (msg, "DueDate", &dt, TRUE);
+ 		e_ews_message_end_set_item_field (msg);
+@@ -1787,7 +1789,7 @@ convert_vtodo_component_to_updatexml (ES
+ 
+ 	prop = icalcomponent_get_first_property (icalcomp, ICAL_DTSTART_PROPERTY);
+ 	if (prop) {
+-		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
++		dt = e_cal_backend_ews_get_datetime_with_zone (convert_data->timezone_cache, convert_data->vcalendar, icalcomp, ICAL_DTSTART_PROPERTY, icalproperty_get_dtstart);
+ 		e_ews_message_start_set_item_field (msg, "StartDate", "task", "Task");
+ 		e_ews_cal_utils_set_time (msg, "StartDate", &dt, TRUE);
+ 		e_ews_message_end_set_item_field (msg);
+@@ -2011,6 +2013,7 @@ e_cal_backend_ews_prepare_accept_item_re
+ 
+ struct icaltimetype
+ e_cal_backend_ews_get_datetime_with_zone (ETimezoneCache *timezone_cache,
++					  icalcomponent *vcalendar,
+ 					  icalcomponent *comp,
+ 					  icalproperty_kind prop_kind,
+ 					  struct icaltimetype (* get_func) (const icalproperty *prop))
+@@ -2018,7 +2021,7 @@ e_cal_backend_ews_get_datetime_with_zone
+ 	struct icaltimetype dt = icaltime_null_time ();
+ 	icalproperty *prop;
+ 	icalparameter *param;
+-	const gchar *tzid;
++	const gchar *tzid, *eqv_tzid;
+ 
+ 	g_return_val_if_fail (E_IS_TIMEZONE_CACHE (timezone_cache), dt);
+ 	g_return_val_if_fail (comp != NULL, dt);
+@@ -2034,6 +2037,8 @@ e_cal_backend_ews_get_datetime_with_zone
+ 	    icaltime_is_null_time (dt))
+ 		return dt;
+ 
++	dt.zone = NULL;
++
+ 	param = icalproperty_get_first_parameter (prop, ICAL_TZID_PARAMETER);
+ 	if (!param)
+ 		return dt;
+@@ -2042,7 +2047,23 @@ e_cal_backend_ews_get_datetime_with_zone
+ 	if (!tzid || !*tzid)
+ 		return dt;
+ 
+-	dt.zone = e_timezone_cache_get_timezone (timezone_cache, tzid);
++	eqv_tzid = e_cal_backend_ews_tz_util_get_ical_equivalent (tzid);
++
++	if (!eqv_tzid) {
++		/* Unlikely to work, but just in case */
++		eqv_tzid = e_cal_backend_ews_tz_util_get_msdn_equivalent (tzid);
++		if (eqv_tzid)
++			eqv_tzid = e_cal_backend_ews_tz_util_get_ical_equivalent (eqv_tzid);
++	}
++
++	if (eqv_tzid)
++		dt.zone = e_timezone_cache_get_timezone (timezone_cache, eqv_tzid);
++
++	if (!dt.zone)
++		dt.zone = e_timezone_cache_get_timezone (timezone_cache, tzid);
++
++	if (!dt.zone)
++		dt.zone = vcalendar ? icalcomponent_get_timezone (vcalendar, tzid) : NULL;
+ 
+ 	return dt;
+ }
+diff -up evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.h.import-event-timezone evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.h
+--- evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.h.import-event-timezone	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/calendar/e-cal-backend-ews-utils.h	2018-09-04 11:14:27.814647542 +0200
+@@ -47,6 +47,7 @@ typedef struct {
+ 	ECalComponent *comp;
+ 	ECalComponent *old_comp;
+ 	icalcomponent *icalcomp;
++	icalcomponent *vcalendar; /* can be NULL, parent of icalcomp, where timezones can be eventually found */
+ 	gchar *item_id;
+ 	gchar *change_key;
+ 	EEwsItemChangeType change_type;
+@@ -82,6 +83,7 @@ guint e_cal_backend_ews_rid_to_index (ic
+ 
+ struct icaltimetype
+ 		e_cal_backend_ews_get_datetime_with_zone	(ETimezoneCache *timezone_cache,
++								 icalcomponent *vcalendar,
+ 								 icalcomponent *comp,
+ 								 icalproperty_kind prop_kind,
+ 								 struct icaltimetype (* get_func) (const icalproperty *prop));

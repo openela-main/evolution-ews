@@ -1,0 +1,75 @@
+diff -up evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c.save-only-if-organizer evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c
+--- evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c.save-only-if-organizer	2019-11-13 07:44:37.295278517 +0100
++++ evolution-ews-3.28.5/src/calendar/e-cal-backend-ews.c	2019-11-13 07:55:27.656269523 +0100
+@@ -147,6 +147,41 @@ ecb_ews_get_collection_settings (ECalBac
+ 	return CAMEL_EWS_SETTINGS (settings);
+ }
+ 
++static GHashTable *
++ecb_ews_get_mail_aliases (ECalBackendEws *cbews)
++{
++	ESource *source;
++	ESourceRegistry *registry;
++	GHashTable *aliases = NULL;
++	GList *identities, *link;
++	const gchar *parent_uid;
++
++	source = e_backend_get_source (E_BACKEND (cbews));
++	parent_uid = e_source_get_parent (source);
++
++	if (!parent_uid || !*parent_uid)
++		return NULL;
++
++	registry = e_cal_backend_get_registry (E_CAL_BACKEND (cbews));
++	identities = e_source_registry_list_enabled (registry, E_SOURCE_EXTENSION_MAIL_IDENTITY);
++
++	for (link = identities; link; link = g_list_next (link)) {
++		ESource *mail_identity = link->data;
++
++		if (g_strcmp0 (parent_uid, e_source_get_parent (mail_identity)) == 0) {
++			ESourceMailIdentity *extension;
++
++			extension = e_source_get_extension (mail_identity, E_SOURCE_EXTENSION_MAIL_IDENTITY);
++			aliases = e_source_mail_identity_get_aliases_as_hash_table (extension);
++			break;
++		}
++	}
++
++	g_list_free_full (identities, g_object_unref);
++
++	return aliases;
++}
++
+ static void
+ ecb_ews_convert_error_to_edc_error (GError **perror)
+ {
+@@ -1350,6 +1385,18 @@ ecb_ews_is_organizer (ECalBackendEws *cb
+ 		is_organizer = user_email && g_ascii_strcasecmp (email, user_email) == 0;
+ 
+ 		g_free (user_email);
++
++		if (!is_organizer) {
++			GHashTable *aliases;
++
++			aliases = ecb_ews_get_mail_aliases (cbews);
++
++			if (aliases) {
++				is_organizer = g_hash_table_contains (aliases, email);
++
++				g_hash_table_unref (aliases);
++			}
++		}
+ 	}
+ 
+ 	return is_organizer;
+@@ -2595,6 +2642,10 @@ ecb_ews_save_component_sync (ECalMetaBac
+ 		g_slist_free_full (existing, g_object_unref);
+ 		g_slist_free_full (changed_instances, change_data_free);
+ 		g_slist_free_full (removed_instances, g_object_unref);
++	} else if (e_cal_component_has_organizer (master) &&
++		   !ecb_ews_is_organizer (cbews, master)) {
++		success = FALSE;
++		g_propagate_error (error, EDC_ERROR_EX (PermissionDenied, _("Cannot create meetings organized by other users in an Exchange Web Services calendar.")));
+ 	} else {
+ 		GHashTable *removed_indexes;
+ 		EwsCalendarConvertData convert_data = { 0 };
