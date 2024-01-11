@@ -1,0 +1,707 @@
+diff -up evolution-ews-3.28.5/CMakeLists.txt.oauth2-endpoints evolution-ews-3.28.5/CMakeLists.txt
+--- evolution-ews-3.28.5/CMakeLists.txt.oauth2-endpoints	2020-10-07 17:08:15.761562791 +0200
++++ evolution-ews-3.28.5/CMakeLists.txt	2020-10-07 17:08:15.762562790 +0200
+@@ -195,6 +195,12 @@ if(WITH_OFFICE365_REDIRECT_URI STREQUAL
+ 	set(WITH_OFFICE365_REDIRECT_URI "https://login.microsoftonline.com/common/oauth2/nativeclient")
+ endif(WITH_OFFICE365_REDIRECT_URI STREQUAL "")
+ 
++add_printable_variable(WITH_OFFICE365_ENDPOINT_HOST "Office365.com OAuth 2.0 endpoint host" "")
++
++if(WITH_OFFICE365_ENDPOINT_HOST STREQUAL "")
++	set(WITH_OFFICE365_ENDPOINT_HOST "login.microsoftonline.com")
++endif(WITH_OFFICE365_ENDPOINT_HOST STREQUAL "")
++
+ # ******************************
+ # Special directories
+ # ******************************
+diff -up evolution-ews-3.28.5/config.h.in.oauth2-endpoints evolution-ews-3.28.5/config.h.in
+--- evolution-ews-3.28.5/config.h.in.oauth2-endpoints	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/config.h.in	2020-10-07 17:08:15.762562790 +0200
+@@ -29,3 +29,6 @@
+ 
+ /* Define Office365 OAuth 2.0 default Redirect URI to use */
+ #define OFFICE365_REDIRECT_URI "@WITH_OFFICE365_REDIRECT_URI@"
++
++/* Define Office365 OAuth 2.0 default Endpoint Host to use */
++#define OFFICE365_ENDPOINT_HOST "@WITH_OFFICE365_ENDPOINT_HOST@"
+diff -up evolution-ews-3.28.5/src/configuration/e-mail-config-ews-backend.c.oauth2-endpoints evolution-ews-3.28.5/src/configuration/e-mail-config-ews-backend.c
+--- evolution-ews-3.28.5/src/configuration/e-mail-config-ews-backend.c.oauth2-endpoints	2020-10-07 17:08:15.761562791 +0200
++++ evolution-ews-3.28.5/src/configuration/e-mail-config-ews-backend.c	2020-10-07 17:08:15.762562790 +0200
+@@ -29,6 +29,7 @@
+ #include <mail/e-mail-config-receiving-page.h>
+ 
+ #include "server/camel-ews-settings.h"
++#include "server/e-oauth2-service-office365.h"
+ 
+ #include "e-mail-config-ews-autodiscover.h"
+ #include "e-ews-config-utils.h"
+@@ -50,6 +51,8 @@ struct _EMailConfigEwsBackendPrivate {
+ 	GtkWidget *oauth2_tenant_entry;
+ 	GtkWidget *oauth2_client_id_entry;
+ 	GtkWidget *oauth2_redirect_uri_entry;
++	GtkWidget *oauth2_resource_uri_entry;
++	GtkWidget *oauth2_endpoint_host_entry;
+ };
+ 
+ G_DEFINE_DYNAMIC_TYPE (
+@@ -156,6 +159,11 @@ mail_config_ews_backend_insert_widgets (
+ 	GtkLabel *label;
+ 	GtkWidget *widget;
+ 	GtkWidget *container;
++	GtkWidget *expander;
++	GtkWidget *advanced_help;
++	GtkWidget *endpoint_host_label;
++	GtkWidget *redirect_uri_label;
++	GtkWidget *resource_uri_label;
+ 	const gchar *extension_name;
+ 	const gchar *text;
+ 	gchar *markup;
+@@ -381,11 +389,62 @@ mail_config_ews_backend_insert_widgets (
+ 		_("There is not set any default application ID"),
+ 		g_strdup_printf (_("Default application ID is “%s”"), OFFICE365_CLIENT_ID));
+ 
+-	widget = gtk_label_new_with_mnemonic (_("_Redirect URI:"));
++	container = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
++	gtk_grid_attach (priv->oauth2_settings_grid, container, 0, 3, 2, 1);
++
++	widget = gtk_expander_new_with_mnemonic (_("_Advanced Settings"));
++	gtk_widget_set_margin_left (widget, 12);
++	gtk_box_pack_start (GTK_BOX (container), widget, FALSE, FALSE, 0);
++	expander = widget;
++
++	e_binding_bind_property (
++		priv->oauth2_override_check, "active",
++		widget, "sensitive",
++		G_BINDING_SYNC_CREATE);
++
++	markup = g_markup_printf_escaped ("(<a href=\"https://wiki.gnome.org/Apps/Evolution/EWS/OAuth2#Alternative_endpoints\">%s</a>)", _("Help…"));
++	widget = gtk_label_new (markup);
++	gtk_label_set_use_markup (GTK_LABEL (widget), TRUE);
++	gtk_misc_set_alignment (GTK_MISC (widget), 0.0, 0.5);
++	gtk_box_pack_start (GTK_BOX (container), widget, FALSE, FALSE, 0);
++	g_free (markup);
++	advanced_help = widget;
++
++	widget = gtk_label_new_with_mnemonic (_("_Endpoint host:"));
++	gtk_widget_set_margin_left (widget, 12);
++	gtk_misc_set_alignment (GTK_MISC (widget), 1.0, 0.5);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 0, 4, 1, 1);
++	label = GTK_LABEL (widget);
++	endpoint_host_label = widget;
++
++	e_binding_bind_property (
++		priv->oauth2_override_check, "active",
++		widget, "sensitive",
++		G_BINDING_SYNC_CREATE);
++
++	widget = gtk_entry_new ();
++	gtk_widget_set_hexpand (widget, TRUE);
++	gtk_label_set_mnemonic_widget (label, widget);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 1, 4, 1, 1);
++	priv->oauth2_endpoint_host_entry = widget;
++
++	e_binding_bind_property (
++		priv->oauth2_override_check, "active",
++		widget, "sensitive",
++		G_BINDING_SYNC_CREATE);
++
++	markup = g_strdup_printf (_("Default endpoint host is “%s”"), "login.microsoftonline.com");
++	mail_config_ews_backend_set_oauth2_tooltip (widget, OFFICE365_ENDPOINT_HOST,
++		markup,
++		g_strdup_printf (_("Default endpoint host is “%s”"), OFFICE365_ENDPOINT_HOST));
++	g_free (markup);
++
++	widget = gtk_label_new_with_mnemonic (_("Red_irect URI:"));
+ 	gtk_widget_set_margin_left (widget, 12);
+ 	gtk_misc_set_alignment (GTK_MISC (widget), 1.0, 0.5);
+-	gtk_grid_attach (priv->oauth2_settings_grid, widget, 0, 3, 1, 1);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 0, 5, 1, 1);
+ 	label = GTK_LABEL (widget);
++	redirect_uri_label = widget;
+ 
+ 	e_binding_bind_property (
+ 		priv->oauth2_override_check, "active",
+@@ -395,7 +454,7 @@ mail_config_ews_backend_insert_widgets (
+ 	widget = gtk_entry_new ();
+ 	gtk_widget_set_hexpand (widget, TRUE);
+ 	gtk_label_set_mnemonic_widget (label, widget);
+-	gtk_grid_attach (priv->oauth2_settings_grid, widget, 1, 3, 1, 1);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 1, 5, 1, 1);
+ 	priv->oauth2_redirect_uri_entry = widget;
+ 
+ 	e_binding_bind_property (
+@@ -409,8 +468,77 @@ mail_config_ews_backend_insert_widgets (
+ 		g_strdup_printf (_("Default redirect URI is “%s”"), OFFICE365_REDIRECT_URI));
+ 	g_free (markup);
+ 
++	widget = gtk_label_new_with_mnemonic (_("Re_source URI:"));
++	gtk_widget_set_margin_left (widget, 12);
++	gtk_misc_set_alignment (GTK_MISC (widget), 1.0, 0.5);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 0, 6, 1, 1);
++	label = GTK_LABEL (widget);
++	resource_uri_label = widget;
++
++	e_binding_bind_property (
++		priv->oauth2_override_check, "active",
++		widget, "sensitive",
++		G_BINDING_SYNC_CREATE);
++
++	widget = gtk_entry_new ();
++	gtk_widget_set_hexpand (widget, TRUE);
++	gtk_label_set_mnemonic_widget (label, widget);
++	gtk_grid_attach (priv->oauth2_settings_grid, widget, 1, 6, 1, 1);
++	priv->oauth2_resource_uri_entry = widget;
++
++	e_binding_bind_property (
++		priv->oauth2_override_check, "active",
++		widget, "sensitive",
++		G_BINDING_SYNC_CREATE);
++
++	markup = g_strdup_printf (_("Default resource URI is derived from the Host URL, or it can eventually fall back to “%s”."), OFFICE365_FALLBACK_RESOURCE_URI);
++	mail_config_ews_backend_set_oauth2_tooltip (widget, NULL,
++		markup,
++		NULL);
++	g_free (markup);
++
+ 	gtk_widget_show_all (GTK_WIDGET (priv->oauth2_settings_grid));
+ 
++	gtk_expander_set_expanded (GTK_EXPANDER (expander),
++		e_ews_util_strcmp0 (camel_ews_settings_get_oauth2_endpoint_host (CAMEL_EWS_SETTINGS (settings)), NULL) != 0 ||
++		e_ews_util_strcmp0 (camel_ews_settings_get_oauth2_redirect_uri (CAMEL_EWS_SETTINGS (settings)), NULL) != 0 ||
++		e_ews_util_strcmp0 (camel_ews_settings_get_oauth2_resource_uri (CAMEL_EWS_SETTINGS (settings)), NULL) != 0);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		advanced_help, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		endpoint_host_label, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		priv->oauth2_endpoint_host_entry, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		redirect_uri_label, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		priv->oauth2_redirect_uri_entry, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		resource_uri_label, "visible",
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_property (
++		expander, "expanded",
++		priv->oauth2_resource_uri_entry, "visible",
++		G_BINDING_SYNC_CREATE);
++
+ 	e_binding_bind_property_full (
+ 		priv->auth_check, "active-mechanism",
+ 		priv->oauth2_settings_grid, "visible",
+@@ -463,11 +591,23 @@ mail_config_ews_backend_insert_widgets (
+ 		G_BINDING_SYNC_CREATE);
+ 
+ 	e_binding_bind_object_text_property (
+-		settings, "oauth2-redirect_uri",
++		settings, "oauth2-redirect-uri",
+ 		priv->oauth2_redirect_uri_entry, "text",
+ 		G_BINDING_BIDIRECTIONAL |
+ 		G_BINDING_SYNC_CREATE);
+ 
++	e_binding_bind_object_text_property (
++		settings, "oauth2-resource-uri",
++		priv->oauth2_resource_uri_entry, "text",
++		G_BINDING_BIDIRECTIONAL |
++		G_BINDING_SYNC_CREATE);
++
++	e_binding_bind_object_text_property (
++		settings, "oauth2-endpoint-host",
++		priv->oauth2_endpoint_host_entry, "text",
++		G_BINDING_BIDIRECTIONAL |
++		G_BINDING_SYNC_CREATE);
++
+ 	extension_name = E_SOURCE_EXTENSION_COLLECTION;
+ 	source = e_mail_config_service_backend_get_collection (backend);
+ 	extension = e_source_get_extension (source, extension_name);
+diff -up evolution-ews-3.28.5/src/server/camel-ews-settings.c.oauth2-endpoints evolution-ews-3.28.5/src/server/camel-ews-settings.c
+--- evolution-ews-3.28.5/src/server/camel-ews-settings.c.oauth2-endpoints	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/server/camel-ews-settings.c	2020-10-07 17:08:15.762562790 +0200
+@@ -47,6 +47,8 @@ struct _CamelEwsSettingsPrivate {
+ 	gchar *oauth2_tenant;
+ 	gchar *oauth2_client_id;
+ 	gchar *oauth2_redirect_uri;
++	gchar *oauth2_resource_uri;
++	gchar *oauth2_endpoint_host;
+ };
+ 
+ enum {
+@@ -74,7 +76,9 @@ enum {
+ 	PROP_OVERRIDE_OAUTH2,
+ 	PROP_OAUTH2_TENANT,
+ 	PROP_OAUTH2_CLIENT_ID,
+-	PROP_OAUTH2_REDIRECT_URI
++	PROP_OAUTH2_REDIRECT_URI,
++	PROP_OAUTH2_RESOURCE_URI,
++	PROP_OAUTH2_ENDPOINT_HOST
+ };
+ 
+ G_DEFINE_TYPE_WITH_CODE (
+@@ -263,6 +267,18 @@ ews_settings_set_property (GObject *obje
+ 				CAMEL_EWS_SETTINGS (object),
+ 				g_value_get_string (value));
+ 			return;
++
++		case PROP_OAUTH2_RESOURCE_URI:
++			camel_ews_settings_set_oauth2_resource_uri (
++				CAMEL_EWS_SETTINGS (object),
++				g_value_get_string (value));
++			return;
++
++		case PROP_OAUTH2_ENDPOINT_HOST:
++			camel_ews_settings_set_oauth2_endpoint_host (
++				CAMEL_EWS_SETTINGS (object),
++				g_value_get_string (value));
++			return;
+ 	}
+ 
+ 	G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+@@ -442,6 +458,20 @@ ews_settings_get_property (GObject *obje
+ 				camel_ews_settings_dup_oauth2_redirect_uri (
+ 				CAMEL_EWS_SETTINGS (object)));
+ 			return;
++
++		case PROP_OAUTH2_RESOURCE_URI:
++			g_value_take_string (
++				value,
++				camel_ews_settings_dup_oauth2_resource_uri (
++				CAMEL_EWS_SETTINGS (object)));
++			return;
++
++		case PROP_OAUTH2_ENDPOINT_HOST:
++			g_value_take_string (
++				value,
++				camel_ews_settings_dup_oauth2_endpoint_host (
++				CAMEL_EWS_SETTINGS (object)));
++			return;
+ 	}
+ 
+ 	G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+@@ -466,6 +496,8 @@ ews_settings_finalize (GObject *object)
+ 	g_free (priv->oauth2_tenant);
+ 	g_free (priv->oauth2_client_id);
+ 	g_free (priv->oauth2_redirect_uri);
++	g_free (priv->oauth2_resource_uri);
++	g_free (priv->oauth2_endpoint_host);
+ 
+ 	/* Chain up to parent's finalize() method. */
+ 	G_OBJECT_CLASS (camel_ews_settings_parent_class)->finalize (object);
+@@ -740,6 +772,30 @@ camel_ews_settings_class_init (CamelEwsS
+ 			G_PARAM_READWRITE |
+ 			G_PARAM_CONSTRUCT |
+ 			G_PARAM_STATIC_STRINGS));
++
++	g_object_class_install_property (
++		object_class,
++		PROP_OAUTH2_RESOURCE_URI,
++		g_param_spec_string (
++			"oauth2-resource-uri",
++			"OAuth2 Resource URI",
++			"OAuth2 Resource URI to use, only if override-oauth2 is TRUE, otherwise the compile-time value is used",
++			NULL,
++			G_PARAM_READWRITE |
++			G_PARAM_CONSTRUCT |
++			G_PARAM_STATIC_STRINGS));
++
++	g_object_class_install_property (
++		object_class,
++		PROP_OAUTH2_ENDPOINT_HOST,
++		g_param_spec_string (
++			"oauth2-endpoint-host",
++			"OAuth2 Endpoint Host",
++			"OAuth2 endpoint host to use, only if override-oauth2 is TRUE, otherwise the compile-time value is used",
++			NULL,
++			G_PARAM_READWRITE |
++			G_PARAM_CONSTRUCT |
++			G_PARAM_STATIC_STRINGS));
+ }
+ 
+ static void
+@@ -1543,3 +1599,97 @@ camel_ews_settings_set_oauth2_redirect_u
+ 
+ 	g_object_notify (G_OBJECT (settings), "oauth2-redirect-uri");
+ }
++
++const gchar *
++camel_ews_settings_get_oauth2_resource_uri (CamelEwsSettings *settings)
++{
++	g_return_val_if_fail (CAMEL_IS_EWS_SETTINGS (settings), NULL);
++
++	return settings->priv->oauth2_resource_uri;
++}
++
++gchar *
++camel_ews_settings_dup_oauth2_resource_uri (CamelEwsSettings *settings)
++{
++	const gchar *protected;
++	gchar *duplicate;
++
++	g_return_val_if_fail (CAMEL_IS_EWS_SETTINGS (settings), NULL);
++
++	g_mutex_lock (&settings->priv->property_lock);
++
++	protected = camel_ews_settings_get_oauth2_resource_uri (settings);
++	duplicate = g_strdup (protected);
++
++	g_mutex_unlock (&settings->priv->property_lock);
++
++	return duplicate;
++}
++
++void
++camel_ews_settings_set_oauth2_resource_uri (CamelEwsSettings *settings,
++					    const gchar *resource_uri)
++{
++	g_return_if_fail (CAMEL_IS_EWS_SETTINGS (settings));
++
++	g_mutex_lock (&settings->priv->property_lock);
++
++	if (g_strcmp0 (settings->priv->oauth2_resource_uri, resource_uri) == 0) {
++		g_mutex_unlock (&settings->priv->property_lock);
++		return;
++	}
++
++	g_free (settings->priv->oauth2_resource_uri);
++	settings->priv->oauth2_resource_uri = e_util_strdup_strip (resource_uri);
++
++	g_mutex_unlock (&settings->priv->property_lock);
++
++	g_object_notify (G_OBJECT (settings), "oauth2-resource-uri");
++}
++
++const gchar *
++camel_ews_settings_get_oauth2_endpoint_host (CamelEwsSettings *settings)
++{
++	g_return_val_if_fail (CAMEL_IS_EWS_SETTINGS (settings), NULL);
++
++	return settings->priv->oauth2_endpoint_host;
++}
++
++gchar *
++camel_ews_settings_dup_oauth2_endpoint_host (CamelEwsSettings *settings)
++{
++	const gchar *protected;
++	gchar *duplicate;
++
++	g_return_val_if_fail (CAMEL_IS_EWS_SETTINGS (settings), NULL);
++
++	g_mutex_lock (&settings->priv->property_lock);
++
++	protected = camel_ews_settings_get_oauth2_endpoint_host (settings);
++	duplicate = g_strdup (protected);
++
++	g_mutex_unlock (&settings->priv->property_lock);
++
++	return duplicate;
++}
++
++void
++camel_ews_settings_set_oauth2_endpoint_host (CamelEwsSettings *settings,
++					     const gchar *endpoint_host)
++{
++	g_return_if_fail (CAMEL_IS_EWS_SETTINGS (settings));
++
++	g_mutex_lock (&settings->priv->property_lock);
++
++	if (g_strcmp0 (settings->priv->oauth2_endpoint_host, endpoint_host) == 0) {
++		g_mutex_unlock (&settings->priv->property_lock);
++		return;
++	}
++
++	g_free (settings->priv->oauth2_endpoint_host);
++	settings->priv->oauth2_endpoint_host = e_util_strdup_strip (endpoint_host);
++
++	g_mutex_unlock (&settings->priv->property_lock);
++
++	g_object_notify (G_OBJECT (settings), "oauth2-endpoint-host");
++}
+diff -up evolution-ews-3.28.5/src/server/camel-ews-settings.h.oauth2-endpoints evolution-ews-3.28.5/src/server/camel-ews-settings.h
+--- evolution-ews-3.28.5/src/server/camel-ews-settings.h.oauth2-endpoints	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/server/camel-ews-settings.h	2020-10-07 17:08:15.763562790 +0200
+@@ -167,6 +167,20 @@ gchar *		camel_ews_settings_dup_oauth2_r
+ void		camel_ews_settings_set_oauth2_redirect_uri
+ 						(CamelEwsSettings *settings,
+ 						 const gchar *redirect_uri);
++const gchar *	camel_ews_settings_get_oauth2_resource_uri
++						(CamelEwsSettings *settings);
++gchar *		camel_ews_settings_dup_oauth2_resource_uri
++						(CamelEwsSettings *settings);
++void		camel_ews_settings_set_oauth2_resource_uri
++						(CamelEwsSettings *settings,
++						 const gchar *resource_uri);
++const gchar *	camel_ews_settings_get_oauth2_endpoint_host
++						(CamelEwsSettings *settings);
++gchar *		camel_ews_settings_dup_oauth2_endpoint_host
++						(CamelEwsSettings *settings);
++void		camel_ews_settings_set_oauth2_endpoint_host
++						(CamelEwsSettings *settings,
++						 const gchar *endpoint_host);
+ 
+ G_END_DECLS
+ 
+diff -up evolution-ews-3.28.5/src/server/e-ews-connection.c.oauth2-endpoints evolution-ews-3.28.5/src/server/e-ews-connection.c
+--- evolution-ews-3.28.5/src/server/e-ews-connection.c.oauth2-endpoints	2020-10-07 17:08:43.161554484 +0200
++++ evolution-ews-3.28.5/src/server/e-ews-connection.c	2020-10-07 17:09:20.338543223 +0200
+@@ -9914,13 +9914,7 @@ ews_connection_gather_auth_methods_cb (S
+ 
+ 	if (!has_bearer) {
+ 		/* Special-case Office365 OAuth2, because outlook.office365.com doesn't advertise Bearer */
+-		SoupURI *suri;
+-
+-		suri = soup_message_get_uri (message);
+-		if (suri && soup_uri_get_host (suri) &&
+-		    g_ascii_strcasecmp (soup_uri_get_host (suri), "outlook.office365.com") == 0) {
+-			async_data->items = g_slist_prepend (async_data->items, g_strdup ("Bearer"));
+-		}
++		async_data->items = g_slist_prepend (async_data->items, g_strdup ("Bearer"));
+ 	}
+ 
+ 	g_object_set_data (G_OBJECT (simple), EWS_OBJECT_KEY_AUTHS_GATHERED, GINT_TO_POINTER (1));
+diff -up evolution-ews-3.28.5/src/server/e-oauth2-service-office365.c.oauth2-endpoints evolution-ews-3.28.5/src/server/e-oauth2-service-office365.c
+--- evolution-ews-3.28.5/src/server/e-oauth2-service-office365.c.oauth2-endpoints	2020-10-07 17:08:15.761562791 +0200
++++ evolution-ews-3.28.5/src/server/e-oauth2-service-office365.c	2020-10-07 17:09:30.526540133 +0200
+@@ -28,8 +28,6 @@
+    https://tsmatz.wordpress.com/2016/10/07/application-permission-with-v2-endpoint-and-microsoft-graph/
+ */
+ 
+-#define OFFICE365_RESOURCE "https://outlook.office.com"
+-
+ struct _EOAuth2ServiceOffice365Private
+ {
+ 	GMutex string_cache_lock;
+@@ -53,8 +51,10 @@ eos_office365_cache_string (EOAuth2Servi
+ 	if (!str)
+ 		return NULL;
+ 
+-	if (!*str)
++	if (!*str) {
++		g_free (str);
+ 		return "";
++	}
+ 
+ 	g_mutex_lock (&oauth2_office365->priv->string_cache_lock);
+ 
+@@ -71,6 +71,24 @@ eos_office365_cache_string (EOAuth2Servi
+ 	return cached_str;
+ }
+ 
++static const gchar *
++eos_office365_get_endpoint_host (EOAuth2ServiceOffice365 *oauth2_office365,
++				 CamelEwsSettings *ews_settings)
++{
++	if (ews_settings && camel_ews_settings_get_override_oauth2 (ews_settings)) {
++		gchar *endpoint_host;
++
++		endpoint_host = camel_ews_settings_dup_oauth2_endpoint_host (ews_settings);
++
++		if (endpoint_host && *endpoint_host)
++			return eos_office365_cache_string (oauth2_office365, endpoint_host);
++
++		g_free (endpoint_host);
++	}
++
++	return OFFICE365_ENDPOINT_HOST;
++}
++
+ static CamelEwsSettings *
+ eos_office365_get_camel_settings (ESource *source)
+ {
+@@ -92,8 +110,7 @@ eos_office365_guess_can_process (EOAuth2
+ 				 const gchar *hostname)
+ {
+ 	return e_oauth2_services_is_supported () &&
+-		protocol && g_ascii_strcasecmp (protocol, "ews") == 0 &&
+-		hostname && e_util_utf8_strstrcase (hostname, "outlook.office365.com");
++		protocol && g_ascii_strcasecmp (protocol, "ews") == 0;
+ }
+ 
+ static const gchar *
+@@ -158,7 +175,8 @@ eos_office365_get_authentication_uri (EO
+ 		}
+ 
+ 		res = eos_office365_cache_string (oauth2_office365,
+-			g_strdup_printf ("https://login.microsoftonline.com/%s/oauth2/authorize",
++			g_strdup_printf ("https://%s/%s/oauth2/authorize",
++				eos_office365_get_endpoint_host (oauth2_office365, ews_settings),
+ 				tenant ? tenant : OFFICE365_TENANT));
+ 
+ 		g_free (tenant);
+@@ -166,7 +184,10 @@ eos_office365_get_authentication_uri (EO
+ 		return res;
+ 	}
+ 
+-	return "https://login.microsoftonline.com/" OFFICE365_TENANT "/oauth2/authorize";
++	return eos_office365_cache_string (oauth2_office365,
++		g_strdup_printf ("https://%s/%s/oauth2/authorize",
++			eos_office365_get_endpoint_host (oauth2_office365, ews_settings),
++			OFFICE365_TENANT));
+ }
+ 
+ static const gchar *
+@@ -188,7 +209,8 @@ eos_office365_get_refresh_uri (EOAuth2Se
+ 		}
+ 
+ 		res = eos_office365_cache_string (oauth2_office365,
+-			g_strdup_printf ("https://login.microsoftonline.com/%s/oauth2/token",
++			g_strdup_printf ("https://%s/%s/oauth2/token",
++				eos_office365_get_endpoint_host (oauth2_office365, ews_settings),
+ 				tenant ? tenant : OFFICE365_TENANT));
+ 
+ 		g_free (tenant);
+@@ -196,7 +218,10 @@ eos_office365_get_refresh_uri (EOAuth2Se
+ 		return res;
+ 	}
+ 
+-	return "https://login.microsoftonline.com/" OFFICE365_TENANT "/oauth2/token";
++	return eos_office365_cache_string (oauth2_office365,
++		g_strdup_printf ("https://%s/%s/oauth2/token",
++			eos_office365_get_endpoint_host (oauth2_office365, ews_settings),
++			OFFICE365_TENANT));
+ }
+ 
+ static const gchar *
+@@ -220,13 +245,67 @@ eos_office365_get_redirect_uri (EOAuth2S
+ 
+ 		if (redirect_uri)
+ 			return eos_office365_cache_string (oauth2_office365, redirect_uri);
++
++		if (e_ews_util_strcmp0 (camel_ews_settings_get_oauth2_endpoint_host (ews_settings), NULL) != 0) {
++			return eos_office365_cache_string (oauth2_office365,
++				g_strdup_printf ("https://%s/common/oauth2/nativeclient",
++					eos_office365_get_endpoint_host (oauth2_office365, ews_settings)));
++		}
+ 	}
+ 
+ 	res = OFFICE365_REDIRECT_URI;
+ 	if (res && *res)
+ 		return res;
+ 
+-	return "https://login.microsoftonline.com/common/oauth2/nativeclient";
++	return eos_office365_cache_string (oauth2_office365,
++		g_strdup_printf ("https://%s/common/oauth2/nativeclient",
++			eos_office365_get_endpoint_host (oauth2_office365, ews_settings)));
++}
++
++static const gchar *
++eos_office365_get_resource_uri (EOAuth2Service *service,
++				ESource *source)
++{
++	EOAuth2ServiceOffice365 *oauth2_office365 = E_OAUTH2_SERVICE_OFFICE365 (service);
++	CamelEwsSettings *ews_settings;
++
++	ews_settings = eos_office365_get_camel_settings (source);
++	if (ews_settings && camel_ews_settings_get_override_oauth2 (ews_settings)) {
++		gchar *resource_uri;
++
++		resource_uri = camel_ews_settings_dup_oauth2_resource_uri (ews_settings);
++
++		if (resource_uri && !*resource_uri) {
++			g_free (resource_uri);
++			resource_uri = NULL;
++		}
++
++		if (resource_uri)
++			return eos_office365_cache_string (oauth2_office365, resource_uri);
++	}
++
++	if (ews_settings) {
++		gchar *host_url;
++
++		host_url = camel_ews_settings_dup_hosturl (ews_settings);
++
++		if (host_url && *host_url) {
++			gchar *ptr;
++
++			ptr = strstr (host_url, "://");
++			ptr = ptr ? strchr (ptr + 3, '/') : NULL;
++
++			if (ptr) {
++				*ptr = '\0';
++
++				return eos_office365_cache_string (oauth2_office365, host_url);
++			}
++		}
++
++		g_free (host_url);
++	}
++
++	return OFFICE365_FALLBACK_RESOURCE_URI;
+ }
+ 
+ static void
+@@ -238,7 +317,7 @@ eos_office365_prepare_authentication_uri
+ 
+ 	e_oauth2_service_util_set_to_form (uri_query, "response_mode", "query");
+ 	e_oauth2_service_util_set_to_form (uri_query, "prompt", "login");
+-	e_oauth2_service_util_set_to_form (uri_query, "resource", OFFICE365_RESOURCE);
++	e_oauth2_service_util_set_to_form (uri_query, "resource", eos_office365_get_resource_uri (service, source));
+ }
+ 
+ static gboolean
+@@ -305,7 +384,7 @@ eos_office365_prepare_refresh_token_form
+ {
+ 	g_return_if_fail (form != NULL);
+ 
+-	e_oauth2_service_util_set_to_form (form, "resource", OFFICE365_RESOURCE);
++	e_oauth2_service_util_set_to_form (form, "resource", eos_office365_get_resource_uri (service, source));
+ 	e_oauth2_service_util_set_to_form (form, "redirect_uri", e_oauth2_service_get_redirect_uri (service, source));
+ }
+ 
+@@ -369,3 +448,16 @@ e_oauth2_service_office365_type_register
+ {
+ 	e_oauth2_service_office365_register_type (type_module);
+ }
++
++gint
++e_ews_util_strcmp0 (const gchar *str1,
++		    const gchar *str2)
++{
++	if (str1 && !*str1)
++		str1 = NULL;
++
++	if (str2 && !*str2)
++		str2 = NULL;
++
++	return g_strcmp0 (str1, str2);
++}
+diff -up evolution-ews-3.28.5/src/server/e-oauth2-service-office365.h.oauth2-endpoints evolution-ews-3.28.5/src/server/e-oauth2-service-office365.h
+--- evolution-ews-3.28.5/src/server/e-oauth2-service-office365.h.oauth2-endpoints	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/server/e-oauth2-service-office365.h	2020-10-07 17:08:15.763562790 +0200
+@@ -39,6 +39,8 @@
+ 	(G_TYPE_INSTANCE_GET_CLASS \
+ 	((obj), E_TYPE_OAUTH2_SERVICE_OFFICE365, EOAuth2ServiceOffice365Class))
+ 
++#define OFFICE365_FALLBACK_RESOURCE_URI "https://outlook.office365.com"
++
+ G_BEGIN_DECLS
+ 
+ typedef struct _EOAuth2ServiceOffice365 EOAuth2ServiceOffice365;
+@@ -59,6 +61,9 @@ GType		e_oauth2_service_office365_get_ty
+ void		e_oauth2_service_office365_type_register
+ 							(GTypeModule *type_module);
+ 
++gint		e_ews_util_strcmp0			(const gchar *str1,
++							 const gchar *str2);
++
+ G_END_DECLS
+ 
+ #endif /* E_OAUTH2_SERVICE_OFFICE365_H */

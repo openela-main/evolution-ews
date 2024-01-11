@@ -1,0 +1,1168 @@
+diff -up evolution-ews-3.28.5/src/camel/camel-ews-store.c.sync-category-list evolution-ews-3.28.5/src/camel/camel-ews-store.c
+--- evolution-ews-3.28.5/src/camel/camel-ews-store.c.sync-category-list	2019-10-24 09:39:08.336278207 +0200
++++ evolution-ews-3.28.5/src/camel/camel-ews-store.c	2019-10-24 09:39:08.341278207 +0200
+@@ -673,6 +673,43 @@ ews_update_has_ooo_set (CamelSession *se
+ 	g_clear_object (&oof_settings);
+ }
+ 
++static void
++ews_exchange_server_categories_cb (CamelSession *session,
++				   GCancellable *cancellable,
++				   gpointer user_data,
++				   GError **error)
++{
++	CamelEwsStore *ews_store = user_data;
++	EEwsConnection *cnc;
++	EwsFolderId fid = { 0 };
++	gchar *properties = NULL;
++	GError *local_error = NULL;
++
++	cnc = camel_ews_store_ref_connection (ews_store);
++	if (!cnc)
++		return;
++
++	fid.id = (gchar *) "calendar";
++	fid.is_distinguished_id = TRUE;
++
++	if (e_ews_connection_get_user_configuration_sync (cnc, G_PRIORITY_DEFAULT, &fid, "CategoryList",
++		E_EWS_USER_CONFIGURATION_PROPERTIES_XMLDATA, &properties, cancellable, &local_error) && properties) {
++		guchar *data;
++		gsize data_len = 0;
++
++		data = g_base64_decode (properties, &data_len);
++
++		if (data && data_len > 0)
++			camel_ews_utils_merge_category_list (ews_store, data, data_len);
++
++		g_free (data);
++	}
++
++	g_clear_error (&local_error);
++	g_clear_object (&cnc);
++	g_free (properties);
++}
++
+ struct ScheduleUpdateData
+ {
+ 	GCancellable *cancellable;
+@@ -1252,6 +1289,12 @@ ews_connect_sync (CamelService *service,
+ 				g_object_ref (ews_store),
+ 				g_object_unref);
+ 
++		camel_session_submit_job (
++			session, _("Look up Exchange server categories"),
++			ews_exchange_server_categories_cb,
++			g_object_ref (ews_store),
++			g_object_unref);
++
+ 		if (!priv->updates_cancellable)
+ 			priv->updates_cancellable = g_cancellable_new ();
+ 
+@@ -2377,6 +2420,17 @@ ews_get_folder_info_sync (CamelStore *st
+ 	ews_store = (CamelEwsStore *) store;
+ 	priv = ews_store->priv;
+ 
++	if ((flags & CAMEL_STORE_FOLDER_INFO_REFRESH) != 0 &&
++	    camel_offline_store_get_online (CAMEL_OFFLINE_STORE (ews_store))) {
++		CamelSession *session;
++
++		session = camel_service_ref_session (CAMEL_SERVICE (ews_store));
++		if (session) {
++			ews_exchange_server_categories_cb (session, cancellable, ews_store, NULL);
++			g_object_unref (session);
++		}
++	}
++
+ 	if ((flags & CAMEL_STORE_FOLDER_INFO_SUBSCRIPTION_LIST) != 0) {
+ 		gboolean includes_last_folder = TRUE;
+ 		GSList *folders = NULL, *to_check = NULL;
+diff -up evolution-ews-3.28.5/src/camel/camel-ews-store-summary.c.sync-category-list evolution-ews-3.28.5/src/camel/camel-ews-store-summary.c
+--- evolution-ews-3.28.5/src/camel/camel-ews-store-summary.c.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/camel/camel-ews-store-summary.c	2019-10-24 09:39:08.341278207 +0200
+@@ -31,6 +31,7 @@
+ #define S_UNLOCK(x) (g_rec_mutex_unlock(&(x)->priv->s_lock))
+ 
+ #define STORE_GROUP_NAME "##storepriv"
++#define CATEGORIES_KEY "Categories"
+ #define CURRENT_SUMMARY_VERSION 3
+ 
+ struct _CamelEwsStoreSummaryPrivate {
+@@ -1047,3 +1048,159 @@ camel_ews_store_summary_has_folder (Came
+ 
+ 	return ret;
+ }
++
++static gchar *
++camel_ews_category_to_string (const CamelEwsCategory *cat)
++{
++	gchar *guid, *name, *color_def = NULL, *str;
++
++	g_return_val_if_fail (cat != NULL, NULL);
++
++	guid = g_uri_escape_string (cat->guid, NULL, TRUE);
++	name = g_uri_escape_string (cat->name, NULL, TRUE);
++
++	if (cat->color_def)
++		color_def = g_uri_escape_string (cat->color_def, NULL, TRUE);
++
++	str = g_strconcat (
++		guid ? guid : "", "\t",
++		name ? name : "", "\t",
++		color_def ? color_def : "",
++		NULL);
++
++	g_free (guid);
++	g_free (name);
++	g_free (color_def);
++
++	return str;
++}
++
++static CamelEwsCategory *
++camel_ews_category_from_string (const gchar *str)
++{
++	CamelEwsCategory *cat;
++	gchar **strv, *guid, *name, *color_def;
++
++	g_return_val_if_fail (str != NULL, NULL);
++
++	strv = g_strsplit (str, "\t", -1);
++	if (!strv || !strv[0] || !strv[1]) {
++		g_strfreev (strv);
++		return NULL;
++	}
++
++	guid = g_uri_unescape_string (strv[0], NULL);
++	name = g_uri_unescape_string (strv[1], NULL);
++	color_def = (strv[2] && strv[2][0]) ? g_uri_unescape_string (strv[2], NULL) : NULL;
++
++	cat = camel_ews_category_new (guid, name, color_def);
++
++	g_free (guid);
++	g_free (name);
++	g_free (color_def);
++	g_strfreev (strv);
++
++	return cat;
++}
++
++GHashTable * /* gchar *guid ~> CamelEwsCategory * */
++camel_ews_store_summary_get_categories (CamelEwsStoreSummary *ews_summary)
++{
++	GHashTable *categories;
++	gchar **strv;
++	g_return_val_if_fail (CAMEL_IS_EWS_STORE_SUMMARY (ews_summary), NULL);
++
++	S_LOCK (ews_summary);
++
++	strv = g_key_file_get_string_list (ews_summary->priv->key_file, STORE_GROUP_NAME, CATEGORIES_KEY, NULL, NULL);
++
++	S_UNLOCK (ews_summary);
++
++	categories = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, camel_ews_category_free);
++
++	if (strv) {
++		gint ii;
++
++		for (ii = 0; strv[ii]; ii++) {
++			CamelEwsCategory *cat;
++
++			cat = camel_ews_category_from_string (strv[ii]);
++			if (cat)
++				g_hash_table_insert (categories, cat->guid, cat);
++		}
++
++		g_strfreev (strv);
++	}
++
++	return categories;
++}
++
++void
++camel_ews_store_summary_set_categories (CamelEwsStoreSummary *ews_summary,
++					GHashTable *categories) /* gchar *guid ~> CamelEwsCategory * */
++{
++	GPtrArray *array;
++	GHashTableIter iter;
++	gpointer value;
++
++	g_return_if_fail (CAMEL_IS_EWS_STORE_SUMMARY (ews_summary));
++	g_return_if_fail (categories != NULL);
++
++	array = g_ptr_array_new_full (g_hash_table_size (categories), g_free);
++
++	g_hash_table_iter_init (&iter, categories);
++	while (g_hash_table_iter_next (&iter, NULL, &value)) {
++		CamelEwsCategory *cat = value;
++
++		if (cat) {
++			gchar *str;
++
++			str = camel_ews_category_to_string (cat);
++
++			if (str)
++				g_ptr_array_add (array, str);
++		}
++	}
++
++	S_LOCK (ews_summary);
++
++	g_key_file_set_string_list (ews_summary->priv->key_file, STORE_GROUP_NAME, CATEGORIES_KEY,
++		(const gchar * const *) array->pdata, array->len);
++
++	ews_summary->priv->dirty = TRUE;
++
++	S_UNLOCK (ews_summary);
++
++	g_ptr_array_free (array, TRUE);
++}
++
++CamelEwsCategory *
++camel_ews_category_new (const gchar *guid,
++			const gchar *name,
++			const gchar *color_def)
++{
++	CamelEwsCategory *cat;
++
++	g_return_val_if_fail (guid != NULL, NULL);
++	g_return_val_if_fail (name != NULL, NULL);
++
++	cat = g_new0 (CamelEwsCategory, 1);
++	cat->guid = g_strdup (guid);
++	cat->name = g_strdup (name);
++	cat->color_def = g_strdup (color_def);
++
++	return cat;
++}
++
++void
++camel_ews_category_free (gpointer ptr)
++{
++	CamelEwsCategory *cat = ptr;
++
++	if (cat) {
++		g_free (cat->guid);
++		g_free (cat->name);
++		g_free (cat->color_def);
++		g_free (cat);
++	}
++}
+diff -up evolution-ews-3.28.5/src/camel/camel-ews-store-summary.h.sync-category-list evolution-ews-3.28.5/src/camel/camel-ews-store-summary.h
+--- evolution-ews-3.28.5/src/camel/camel-ews-store-summary.h.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/camel/camel-ews-store-summary.h	2019-10-24 09:39:08.341278207 +0200
+@@ -50,6 +50,12 @@
+ 
+ G_BEGIN_DECLS
+ 
++typedef struct _CamelEwsCategory {
++	gchar *guid;
++	gchar *name;
++	gchar *color_def;
++} CamelEwsCategory;
++
+ typedef struct _CamelEwsStoreSummary CamelEwsStoreSummary;
+ typedef struct _CamelEwsStoreSummaryClass CamelEwsStoreSummaryClass;
+ typedef struct _CamelEwsStoreSummaryPrivate CamelEwsStoreSummaryPrivate;
+@@ -215,6 +221,17 @@ gchar *		camel_ews_store_summary_get_fol
+ gboolean	camel_ews_store_summary_has_folder
+ 						(CamelEwsStoreSummary *ews_summary,
+ 						 const gchar *id);
++GHashTable *	camel_ews_store_summary_get_categories /* gchar *guid ~> CamelEwsCategory * */
++						(CamelEwsStoreSummary *ews_summary);
++void		camel_ews_store_summary_set_categories
++						(CamelEwsStoreSummary *ews_summary,
++						 GHashTable *categories); /* gchar *guid ~> CamelEwsCategory * */
++
++CamelEwsCategory *
++		camel_ews_category_new		(const gchar *guid,
++						 const gchar *name,
++						 const gchar *color_def);
++void		camel_ews_category_free		(gpointer ptr); /* CamelEwsCategory * */
+ 
+ G_END_DECLS
+ 
+diff -up evolution-ews-3.28.5/src/camel/camel-ews-utils.c.sync-category-list evolution-ews-3.28.5/src/camel/camel-ews-utils.c
+--- evolution-ews-3.28.5/src/camel/camel-ews-utils.c.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/camel/camel-ews-utils.c	2019-10-24 09:39:08.341278207 +0200
+@@ -29,6 +29,7 @@
+ #include <glib/gstdio.h>
+ 
+ #include <libemail-engine/libemail-engine.h>
++#include <e-util/e-util.h>
+ 
+ #include "server/camel-ews-settings.h"
+ #include "server/e-ews-camel-common.h"
+@@ -381,6 +382,43 @@ camel_ews_utils_sync_deleted_items (Came
+ }
+ 
+ static const gchar *
++ews_utils_outlook_color_index_to_color_def (gint color_index)
++{
++	const gchar *colors_array[] = {
++		"#ff1a36", /* Red */
++		"#ff8c00", /* Orange */
++		"#f4b10b", /* Peach */
++		"#fff100", /* Yellow */
++		"#009e48", /* Green */
++		"#00b294", /* Teal */
++		"#89933f", /* Olive */
++		"#00bcf2", /* Blue */
++		"#8e69df", /* Purple */
++		"#f30092", /* Maroon */
++		"#6c7e9a", /* Steel */
++		"#425066", /* DarkSteel */
++		"#969696", /* Gray */
++		"#525552", /* DarkGray */
++		"#282828", /* Black */
++		"#a00023", /* DarkRed */
++		"#c45502", /* DarkOrange */
++		"#af7000", /* DarkPeach */
++		"#b59b02", /* DarkYellow */
++		"#176002", /* DarkGreen */
++		"#00725c", /* DarkTeal */
++		"#5c6022", /* DarkOlive */
++		"#036393", /* DarkBlue */
++		"#422f8e", /* DarkPurple */
++		"#960269"  /* DarkMaroon */
++	};
++
++	if (color_index >= 0 && color_index < G_N_ELEMENTS (colors_array))
++		return colors_array[color_index];
++
++	return NULL;
++}
++
++static const gchar *
+ ews_utils_rename_label (const gchar *cat,
+                         gboolean from_cat)
+ {
+@@ -422,6 +460,58 @@ ews_utils_is_system_user_flag (const gch
+ 		g_str_equal (name, "$has-cal");
+ }
+ 
++/* From Exchange name (which allows spaces) to evolution-name */
++static gchar *
++camel_ews_utils_encode_category_name (const gchar *name)
++{
++	if (name && strchr (name, ' ')) {
++		GString *str;
++
++		str = g_string_sized_new (strlen (name) + 16);
++
++		while (*name) {
++			if (*name == '_')
++				g_string_append_c (str, '_');
++
++			g_string_append_c (str, *name == ' ' ? '_' : *name);
++
++			name++;
++		}
++
++		return g_string_free (str, FALSE);
++	}
++
++	return g_strdup (name);
++}
++
++/* From evolution-name to Exchange name (which allows spaces) */
++static gchar *
++camel_ews_utils_decode_category_name (const gchar *flag)
++{
++	if (flag && strchr (flag, '_')) {
++		GString *str = g_string_sized_new (strlen (flag));
++
++		while (*flag) {
++			if (*flag == '_') {
++				if (flag[1] == '_') {
++					g_string_append_c (str, '_');
++					flag++;
++				} else {
++					g_string_append_c (str, ' ');
++				}
++			} else {
++				g_string_append_c (str, *flag);
++			}
++
++			flag++;
++		}
++
++		return g_string_free (str, FALSE);
++	}
++
++	return g_strdup (flag);
++}
++
+ /* free with g_slist_free_full (flags, g_free);
+    the lists' members are values for the String xml element. */
+ GSList *
+@@ -441,6 +531,7 @@ ews_utils_gather_server_user_flags (ESoa
+ 	 * array of strings */
+ 	for (ii = 0; ii < len; ii++) {
+ 		const gchar *n = ews_utils_rename_label (camel_named_flags_get (user_flags, ii), FALSE);
++
+ 		if (*n == '\0')
+ 			continue;
+ 
+@@ -449,26 +540,7 @@ ews_utils_gather_server_user_flags (ESoa
+ 		if (ews_utils_is_system_user_flag (n))
+ 			continue;
+ 
+-		if (strchr (n, '_')) {
+-			GString *str = g_string_sized_new (strlen (n));
+-
+-			while (*n) {
+-				if (*n == '_') {
+-					if (n[1] == '_')
+-						g_string_append_c (str, '_');
+-					else
+-						g_string_append_c (str, ' ');
+-				} else {
+-					g_string_append_c (str, *n);
+-				}
+-
+-				n++;
+-			}
+-
+-			out_user_flags = g_slist_prepend (out_user_flags, g_string_free (str, FALSE));
+-		} else {
+-			out_user_flags = g_slist_prepend (out_user_flags, g_strdup (n));
+-		}
++		out_user_flags = g_slist_prepend (out_user_flags, camel_ews_utils_decode_category_name (n));
+ 	}
+ 
+ 	camel_message_info_property_unlock (mi);
+@@ -512,33 +584,17 @@ ews_utils_merge_server_user_flags (EEwsI
+ 
+ 	/* now transfer over all the categories */
+ 	for (p = e_ews_item_get_categories (item); p; p = p->next) {
+-		const gchar *flag = ews_utils_rename_label (p->data, 1);
+-		gchar *underscored = NULL;
++		const gchar *name = ews_utils_rename_label (p->data, 1);
++		gchar *flag;
+ 
+-		if (!flag || !*flag)
++		if (!name || !*name)
+ 			continue;
+ 
+-		if (strchr (flag, ' ')) {
+-			GString *str;
+-
+-			str = g_string_sized_new (strlen (flag) + 16);
+-
+-			while (*flag) {
+-				if (*flag == '_')
+-					g_string_append_c (str, '_');
+-
+-				g_string_append_c (str, *flag == ' ' ? '_' : *flag);
+-
+-				flag++;
+-			}
+-
+-			underscored = g_string_free (str, FALSE);
+-			flag = underscored;
+-		}
++		flag = camel_ews_utils_encode_category_name (name);
+ 
+ 		camel_message_info_set_user_flag (mi, flag, TRUE);
+ 
+-		g_free (underscored);
++		g_free (flag);
+ 	}
+ 
+ 	camel_message_info_thaw_notifications (mi);
+@@ -1281,3 +1337,279 @@ camel_ews_utils_ref_corresponding_source
+ 
+ 	return source;
+ }
++
++static gboolean
++ews_util_equal_label_tag_cb (gconstpointer ptr1,
++			     gconstpointer ptr2)
++{
++	const gchar *evo_label_def = ptr1;
++	const gchar *tag = ptr2;
++	const gchar *pos;
++
++	if (!evo_label_def || !tag || !*tag)
++		return FALSE;
++
++	pos = g_strrstr (evo_label_def, tag);
++
++	return pos > evo_label_def && pos[-1] == '|' && !pos[strlen (tag)];
++}
++
++static gboolean
++ews_utils_find_in_ptr_array (GPtrArray *haystack,
++			     gconstpointer needle,
++			     GEqualFunc equal_func,
++			     guint *out_index)
++{
++	guint ii;
++
++	if (!haystack)
++		return FALSE;
++
++	if (!equal_func)
++		equal_func = g_direct_equal;
++
++	for (ii = 0; ii < haystack->len; ii++) {
++		if (equal_func (haystack->pdata[ii], needle)) {
++			if (out_index)
++				*out_index = ii;
++
++			return TRUE;
++		}
++	}
++
++	return FALSE;
++}
++
++/* Returns whether had been done any changes */
++static gboolean
++ews_utils_save_category_changes (GHashTable *old_categories, /* gchar *guid ~> CamelEwsCategory * */
++				 GHashTable *new_categories) /* gchar *guid ~> CamelEwsCategory * */
++{
++	GHashTableIter iter;
++	GSettings *settings;
++	GPtrArray *evo_labels; /* gchar * (encoded label definition) */
++	gchar **strv;
++	gint ii;
++	gpointer value;
++	gboolean changed = FALSE;
++
++	if (!old_categories || !new_categories)
++		return new_categories != NULL;
++
++	evo_labels = g_ptr_array_new_full (5, g_free);
++
++	settings = e_util_ref_settings ("org.gnome.evolution.mail");
++	strv = g_settings_get_strv (settings, "labels");
++
++	for (ii = 0; strv && strv[ii]; ii++) {
++		g_ptr_array_add (evo_labels, g_strdup (strv[ii]));
++	}
++
++	g_strfreev (strv);
++
++	g_hash_table_iter_init (&iter, new_categories);
++	while (g_hash_table_iter_next (&iter, NULL, &value)) {
++		CamelEwsCategory *new_cat = value, *old_cat;
++		gchar *tag = NULL;
++
++		if (!new_cat)
++			continue;
++
++		old_cat = g_hash_table_lookup (old_categories, new_cat->guid);
++		if (old_cat) {
++			if (g_strcmp0 (old_cat->name, new_cat->name) != 0 ||
++			    g_strcmp0 (old_cat->color_def, new_cat->color_def) != 0) {
++				/* Old category changed name or color */
++				tag = camel_ews_utils_encode_category_name (new_cat->name);
++			}
++		} else {
++			/* This is a new category */
++			tag = camel_ews_utils_encode_category_name (new_cat->name);
++		}
++
++		if (tag && *tag) {
++			guint index = (guint) -1;
++			gchar *label_def;
++
++			changed = TRUE;
++
++			/* Sanitize value */
++			for (ii = 0; tag[ii]; ii++) {
++				if (tag[ii] == '|')
++					tag[ii] = '-';
++			}
++
++			if (old_cat && g_strcmp0 (old_cat->name, new_cat->name) != 0) {
++				gchar *old_tag = camel_ews_utils_encode_category_name (old_cat->name);
++
++				if (old_tag && *old_tag) {
++					if (!ews_utils_find_in_ptr_array (evo_labels, old_tag, ews_util_equal_label_tag_cb, &index))
++						index = (guint) -1;
++				}
++
++				g_free (old_tag);
++			}
++
++			for (ii = 0; new_cat->name[ii]; ii++) {
++				if (new_cat->name[ii] == '|')
++					new_cat->name[ii] = '-';
++			}
++
++			if (index == (guint) -1 &&
++			    !ews_utils_find_in_ptr_array (evo_labels, tag, ews_util_equal_label_tag_cb, &index))
++				index = (guint) -1;
++
++			label_def = g_strconcat (new_cat->name, "|", new_cat->color_def ? new_cat->color_def : "#FF0000", "|", tag, NULL);
++
++			if (index == (guint) -1 || index >= (gint) evo_labels->len) {
++				g_ptr_array_add (evo_labels, label_def);
++			} else {
++				g_free (evo_labels->pdata[index]);
++				evo_labels->pdata[index] = label_def;
++			}
++		}
++
++		g_hash_table_remove (old_categories, new_cat->guid);
++
++		g_free (tag);
++	}
++
++	if (g_hash_table_size (old_categories) > 0) {
++		/* Some categories had been removed */
++		changed = TRUE;
++
++		g_hash_table_iter_init (&iter, old_categories);
++		while (g_hash_table_iter_next (&iter, NULL, &value)) {
++			CamelEwsCategory *old_cat = value;
++			gchar *old_tag;
++			guint index;
++
++			if (!old_cat)
++				continue;
++
++			old_tag = camel_ews_utils_encode_category_name (old_cat->name);
++
++			for (ii = 0; old_tag && old_tag[ii]; ii++) {
++				if (old_tag[ii] == '|')
++					old_tag[ii] = '-';
++			}
++
++			if (old_tag &&
++			    ews_utils_find_in_ptr_array (evo_labels, old_tag, ews_util_equal_label_tag_cb, &index))
++				g_ptr_array_remove_index (evo_labels, index);
++
++			g_free (old_tag);
++		}
++	}
++
++	if (changed) {
++		/* NULL-terminated array of strings */
++		g_ptr_array_add (evo_labels, NULL);
++
++		g_settings_set_strv (settings, "labels", (const gchar * const *) evo_labels->pdata);
++	}
++
++	g_ptr_array_free (evo_labels, TRUE);
++	g_object_unref (settings);
++
++	return changed;
++}
++
++void
++camel_ews_utils_merge_category_list (CamelEwsStore *ews_store,
++				     const guchar *xml_data,
++				     gsize xml_data_len)
++{
++	xmlDocPtr doc;
++	xmlXPathContextPtr xpath_ctx;
++
++	g_return_if_fail (CAMEL_IS_EWS_STORE (ews_store));
++	g_return_if_fail (xml_data != NULL);
++
++	doc = e_xml_parse_data (xml_data, xml_data_len);
++	if (!doc)
++		return;
++
++	xpath_ctx = e_xml_new_xpath_context_with_namespaces (doc, "C", "CategoryList.xsd", NULL);
++
++	if (xpath_ctx) {
++		xmlXPathObjectPtr xpath_obj_categories;
++
++		xpath_obj_categories = e_xml_xpath_eval (xpath_ctx, "%s", "/C:categories/C:category");
++
++		if (xpath_obj_categories) {
++			GHashTable *old_categories, *new_categories;
++			gint response_index, response_length;
++
++			new_categories = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, camel_ews_category_free);
++
++			response_length = xmlXPathNodeSetGetLength (xpath_obj_categories->nodesetval);
++
++			for (response_index = 0; response_index < response_length; response_index++) {
++				xmlXPathObjectPtr xpath_obj_category;
++
++				xpath_obj_category = e_xml_xpath_eval (xpath_ctx,
++					"/C:categories/C:category[%d]",
++					response_index + 1);
++
++				if (xpath_obj_category) {
++					gchar *name;
++
++					name = e_xml_xpath_eval_as_string (xpath_ctx, "/C:categories/C:category[%d]/@name", response_index + 1);
++
++					if (name && ews_utils_rename_label (name, 1) == name) {
++						const gchar *color_def = NULL;
++						gchar *color, *guid;
++						gint color_index = -1;
++
++						color = e_xml_xpath_eval_as_string (xpath_ctx, "/C:categories/C:category[%d]/@color", response_index + 1);
++						if (color) {
++							gchar *endptr = NULL;
++
++							color_index = (gint) g_ascii_strtoll (color, &endptr, 10);
++
++							if (endptr == color)
++								color_index = -1;
++						}
++
++						g_free (color);
++
++						if (color_index >= 0)
++							color_def = ews_utils_outlook_color_index_to_color_def (color_index);
++
++						guid = e_xml_xpath_eval_as_string (xpath_ctx, "/C:categories/C:category[%d]/@guid", response_index + 1);
++
++						if (guid && *guid) {
++							CamelEwsCategory *cat;
++
++							cat = camel_ews_category_new (guid, name, color_def);
++							if (cat)
++								g_hash_table_insert (new_categories, cat->guid, cat);
++						}
++
++						g_free (guid);
++					}
++
++					g_free (name);
++					xmlXPathFreeObject (xpath_obj_category);
++				}
++			}
++
++			xmlXPathFreeObject (xpath_obj_categories);
++
++			old_categories = camel_ews_store_summary_get_categories (ews_store->summary);
++
++			if (ews_utils_save_category_changes (old_categories, new_categories)) {
++				camel_ews_store_summary_set_categories (ews_store->summary, new_categories);
++				camel_ews_store_summary_save (ews_store->summary, NULL);
++			}
++
++			g_hash_table_destroy (new_categories);
++			g_hash_table_destroy (old_categories);
++		}
++	}
++
++	if (xpath_ctx)
++		xmlXPathFreeContext (xpath_ctx);
++	xmlFreeDoc (doc);
++}
+diff -up evolution-ews-3.28.5/src/camel/camel-ews-utils.h.sync-category-list evolution-ews-3.28.5/src/camel/camel-ews-utils.h
+--- evolution-ews-3.28.5/src/camel/camel-ews-utils.h.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/camel/camel-ews-utils.h	2019-10-24 09:39:08.341278207 +0200
+@@ -94,6 +94,10 @@ CamelMessageInfo * /* (transfer full) */
+ 						 EEwsConnection *cnc,
+ 						 EEwsItem *item,
+ 						 GCancellable *cancellable);
++void		camel_ews_utils_merge_category_list
++						(CamelEwsStore *ews_store,
++						 const guchar *xml_data,
++						 gsize xml_data_len);
+ 
+ G_END_DECLS
+ 
+diff -up evolution-ews-3.28.5/src/server/e-ews-connection.c.sync-category-list evolution-ews-3.28.5/src/server/e-ews-connection.c
+--- evolution-ews-3.28.5/src/server/e-ews-connection.c.sync-category-list	2019-10-24 09:39:08.339278207 +0200
++++ evolution-ews-3.28.5/src/server/e-ews-connection.c	2019-10-24 09:46:14.667272312 +0200
+@@ -155,7 +155,7 @@ struct _EwsAsyncData {
+ 	EwsDelegateDeliver deliver_to;
+ 	EEwsFolderType folder_type;
+ 	EEwsConnection *cnc;
+-	gchar *user_photo; /* base64-encoded, as GetUserPhoto result */
++	gchar *custom_data; /* Can be re-used by operations, will be freed with g_free() */
+ };
+ 
+ struct _EwsNode {
+@@ -200,7 +200,7 @@ ews_connection_error_quark (void)
+ static void
+ async_data_free (EwsAsyncData *async_data)
+ {
+-	g_free (async_data->user_photo);
++	g_free (async_data->custom_data);
+ 	g_free (async_data);
+ }
+ 
+@@ -10830,10 +10830,10 @@ get_user_photo_response_cb (ESoapRespons
+ 		return;
+ 	}
+ 
+-	async_data->user_photo = e_soap_parameter_get_string_value (param);
+-	if (async_data->user_photo && !*async_data->user_photo) {
+-		g_free (async_data->user_photo);
+-		async_data->user_photo = NULL;
++	async_data->custom_data = e_soap_parameter_get_string_value (param);
++	if (async_data->custom_data && !*async_data->custom_data) {
++		g_free (async_data->custom_data);
++		async_data->custom_data = NULL;
+ 	}
+ }
+ 
+@@ -10918,11 +10918,11 @@ e_ews_connection_get_user_photo_finish (
+ 	if (g_simple_async_result_propagate_error (simple, error))
+ 		return FALSE;
+ 
+-	if (!async_data->user_photo)
++	if (!async_data->custom_data)
+ 		return FALSE;
+ 
+-	*out_picture_data = async_data->user_photo;
+-	async_data->user_photo = NULL;
++	*out_picture_data = async_data->custom_data;
++	async_data->custom_data = NULL;
+ 
+ 	return TRUE;
+ }
+@@ -10953,5 +10953,256 @@ e_ews_connection_get_user_photo_sync (EE
+ 
+ 	e_async_closure_free (closure);
+ 
++	return success;
++}
++
++static void
++get_user_configuration_response_cb (ESoapResponse *response,
++				    GSimpleAsyncResult *simple)
++{
++	EwsAsyncData *async_data;
++	ESoapParameter *param, *subparam;
++	GError *error = NULL;
++
++	async_data = g_simple_async_result_get_op_res_gpointer (simple);
++
++	param = e_soap_response_get_first_parameter_by_name (response, "ResponseMessages", &error);
++
++	if (param) {
++		param = e_soap_parameter_get_first_child_by_name (param, "GetUserConfigurationResponseMessage");
++		if (!param) {
++			g_set_error (&error,
++				SOUP_HTTP_ERROR, SOUP_STATUS_MALFORMED,
++				"Missing <%s> in SOAP response", "GetUserConfigurationResponseMessage");
++		}
++	}
++
++	if (param) {
++		param = e_soap_parameter_get_first_child_by_name (param, "UserConfiguration");
++		if (!param) {
++			g_set_error (&error,
++				SOUP_HTTP_ERROR, SOUP_STATUS_MALFORMED,
++				"Missing <%s> in SOAP response", "UserConfiguration");
++		}
++	}
++
++	/* Sanity check */
++	g_return_if_fail (
++		(param != NULL && error == NULL) ||
++		(param == NULL && error != NULL));
++
++	if (error != NULL) {
++		g_simple_async_result_take_error (simple, error);
++		return;
++	}
++
++	subparam = e_soap_parameter_get_first_child_by_name (param, "ItemId");
++	if (subparam) {
++		gchar *id, *changekey;
++
++		id = e_soap_parameter_get_property (subparam, "Id");
++		changekey = e_soap_parameter_get_property (subparam, "ChangeKey");
++
++		/* Encoded as: Id + "\n" + ChangeKey */
++		async_data->custom_data = g_strconcat (id ? id : "", "\n", changekey, NULL);
++
++		g_free (changekey);
++		g_free (id);
++	}
++
++	if (!subparam) {
++		subparam = e_soap_parameter_get_first_child_by_name (param, "Dictionary");
++		if (subparam)
++			async_data->custom_data = e_soap_response_dump_parameter (response, subparam);
++	}
++
++	if (!subparam) {
++		subparam = e_soap_parameter_get_first_child_by_name (param, "XmlData");
++		if (subparam) {
++			async_data->custom_data = e_soap_parameter_get_string_value (subparam);
++		}
++	}
++
++	if (!subparam) {
++		subparam = e_soap_parameter_get_first_child_by_name (param, "BinaryData");
++		if (subparam) {
++			async_data->custom_data = e_soap_parameter_get_string_value (subparam);
++		}
++	}
++
++	if (async_data->custom_data && !*async_data->custom_data) {
++		g_free (async_data->custom_data);
++		async_data->custom_data = NULL;
++	}
++}
++
++static void
++e_ews_folder_id_append_to_msg (ESoapMessage *msg,
++			       const gchar *email,
++			       const EwsFolderId *fid)
++{
++	g_return_if_fail (msg != NULL);
++	g_return_if_fail (fid != NULL);
++
++	if (fid->is_distinguished_id)
++		e_soap_message_start_element (msg, "DistinguishedFolderId", NULL, NULL);
++	else
++		e_soap_message_start_element (msg, "FolderId", NULL, NULL);
++
++	e_soap_message_add_attribute (msg, "Id", fid->id, NULL, NULL);
++	if (fid->change_key)
++		e_soap_message_add_attribute (msg, "ChangeKey", fid->change_key, NULL, NULL);
++
++	if (fid->is_distinguished_id && email) {
++		e_soap_message_start_element (msg, "Mailbox", NULL, NULL);
++		e_ews_message_write_string_parameter (msg, "EmailAddress", NULL, email);
++		e_soap_message_end_element (msg);
++	}
++
++	e_soap_message_end_element (msg);
++}
++
++void
++e_ews_connection_get_user_configuration (EEwsConnection *cnc,
++					 gint pri,
++					 const EwsFolderId *fid,
++					 const gchar *config_name,
++					 EEwsUserConfigurationProperties props,
++					 GCancellable *cancellable,
++					 GAsyncReadyCallback callback,
++					 gpointer user_data)
++{
++	ESoapMessage *msg;
++	GSimpleAsyncResult *simple;
++	EwsAsyncData *async_data;
++	EwsFolderId local_fid;
++
++	g_return_if_fail (cnc != NULL);
++	g_return_if_fail (cnc->priv != NULL);
++	g_return_if_fail (fid != NULL);
++	g_return_if_fail (config_name != NULL);
++
++	simple = g_simple_async_result_new (G_OBJECT (cnc), callback, user_data, e_ews_connection_get_user_configuration);
++	async_data = g_new0 (EwsAsyncData, 1);
++	g_simple_async_result_set_op_res_gpointer (simple, async_data, (GDestroyNotify) async_data_free);
++
++	/* EWS server version earlier than 2010 doesn't support it. */
++	if (!e_ews_connection_satisfies_server_version (cnc, E_EWS_EXCHANGE_2010)) {
++		g_simple_async_result_complete_in_idle (simple);
++		g_object_unref (simple);
++		return;
++	}
++
++	local_fid = *fid;
++	local_fid.change_key = NULL;
++
++	msg = e_ews_message_new_with_header (
++		cnc->priv->settings,
++		cnc->priv->uri,
++		cnc->priv->impersonate_user,
++		"GetUserConfiguration",
++		NULL,
++		NULL,
++		cnc->priv->version,
++		E_EWS_EXCHANGE_2010,
++		FALSE,
++		TRUE);
++
++	e_soap_message_start_element (msg, "UserConfigurationName", "messages", NULL);
++	e_soap_message_add_attribute (msg, "Name", config_name, NULL, NULL);
++
++	e_ews_folder_id_append_to_msg (msg, cnc->priv->email, &local_fid);
++
++	e_soap_message_end_element (msg); /* UserConfigurationName */
++
++	e_soap_message_start_element (msg, "UserConfigurationProperties", "messages", NULL);
++
++	switch (props) {
++	case E_EWS_USER_CONFIGURATION_PROPERTIES_ID:
++		e_soap_message_write_string (msg, "Id");
++		break;
++	case E_EWS_USER_CONFIGURATION_PROPERTIES_DICTIONARY:
++		e_soap_message_write_string (msg, "Dictionary");
++		break;
++	case E_EWS_USER_CONFIGURATION_PROPERTIES_XMLDATA:
++		e_soap_message_write_string (msg, "XmlData");
++		break;
++	case E_EWS_USER_CONFIGURATION_PROPERTIES_BINARYDATA:
++		e_soap_message_write_string (msg, "BinaryData");
++		break;
++	/* case E_EWS_USER_CONFIGURATION_PROPERTIES_ALL:
++		e_soap_message_write_string (msg, "All");
++		break; */
++	default:
++		e_soap_message_write_string (msg, "Unknown");
++		break;
++	}
++
++	e_soap_message_end_element (msg); /* UserConfigurationProperties */
++
++	e_ews_message_write_footer (msg);
++
++	e_ews_connection_queue_request (cnc, msg, get_user_configuration_response_cb, pri, cancellable, simple);
++
++	g_object_unref (simple);
++}
++
++gboolean
++e_ews_connection_get_user_configuration_finish (EEwsConnection *cnc,
++						GAsyncResult *result,
++						gchar **out_properties,
++						GError **error)
++{
++	GSimpleAsyncResult *simple;
++	EwsAsyncData *async_data;
++
++	g_return_val_if_fail (cnc != NULL, FALSE);
++	g_return_val_if_fail (
++		g_simple_async_result_is_valid (result, G_OBJECT (cnc), e_ews_connection_get_user_configuration),
++		FALSE);
++	g_return_val_if_fail (out_properties != NULL, FALSE);
++
++	simple = G_SIMPLE_ASYNC_RESULT (result);
++	async_data = g_simple_async_result_get_op_res_gpointer (simple);
++
++	if (g_simple_async_result_propagate_error (simple, error))
++		return FALSE;
++
++	if (!async_data->custom_data)
++		return FALSE;
++
++	*out_properties = async_data->custom_data;
++	async_data->custom_data = NULL;
++
++	return TRUE;
++}
++
++gboolean
++e_ews_connection_get_user_configuration_sync (EEwsConnection *cnc,
++					      gint pri,
++					      const EwsFolderId *fid,
++					      const gchar *config_name,
++					      EEwsUserConfigurationProperties props,
++					      gchar **out_properties,
++					      GCancellable *cancellable,
++					      GError **error)
++{
++	EAsyncClosure *closure;
++	GAsyncResult *result;
++	gboolean success;
++
++	g_return_val_if_fail (cnc != NULL, FALSE);
++
++	closure = e_async_closure_new ();
++
++	e_ews_connection_get_user_configuration (
++		cnc, pri, fid, config_name, props, cancellable, e_async_closure_callback, closure);
++
++	result = e_async_closure_wait (closure);
++
++	success = e_ews_connection_get_user_configuration_finish (cnc, result, out_properties, error);
++
++	e_async_closure_free (closure);
++
+ 	return success;
+ }
+diff -up evolution-ews-3.28.5/src/server/e-ews-connection.h.sync-category-list evolution-ews-3.28.5/src/server/e-ews-connection.h
+--- evolution-ews-3.28.5/src/server/e-ews-connection.h.sync-category-list	2019-10-24 09:39:08.339278207 +0200
++++ evolution-ews-3.28.5/src/server/e-ews-connection.h	2019-10-24 09:39:08.342278207 +0200
+@@ -132,6 +132,15 @@ typedef enum {
+ 	E_EWS_SIZE_REQUESTED_648X648 = 648
+ } EEwsSizeRequested;
+ 
++typedef enum {
++	E_EWS_USER_CONFIGURATION_PROPERTIES_UNKNOWN = -1,
++	E_EWS_USER_CONFIGURATION_PROPERTIES_ID,
++	E_EWS_USER_CONFIGURATION_PROPERTIES_DICTIONARY,
++	E_EWS_USER_CONFIGURATION_PROPERTIES_XMLDATA,
++	E_EWS_USER_CONFIGURATION_PROPERTIES_BINARYDATA /*,
++	E_EWS_USER_CONFIGURATION_PROPERTIES_ALL - skip it, be specific */
++} EEwsUserConfigurationProperties;
++
+ typedef struct {
+ 	gchar *id;
+ 	gchar *dn;
+@@ -1377,6 +1386,29 @@ gboolean	e_ews_connection_get_user_photo
+ 						 gchar **out_picture_data, /* base64-encoded */
+ 						 GCancellable *cancellable,
+ 						 GError **error);
++void		e_ews_connection_get_user_configuration
++						(EEwsConnection *cnc,
++						 gint pri,
++						 const EwsFolderId *fid,
++						 const gchar *config_name,
++						 EEwsUserConfigurationProperties props,
++						 GCancellable *cancellable,
++						 GAsyncReadyCallback callback,
++						 gpointer user_data);
++gboolean	e_ews_connection_get_user_configuration_finish
++						(EEwsConnection *cnc,
++						 GAsyncResult *result,
++						 gchar **out_properties,
++						 GError **error);
++gboolean	e_ews_connection_get_user_configuration_sync
++						(EEwsConnection *cnc,
++						 gint pri,
++						 const EwsFolderId *fid,
++						 const gchar *config_name,
++						 EEwsUserConfigurationProperties props,
++						 gchar **out_properties,
++						 GCancellable *cancellable,
++						 GError **error);
+ 
+ G_END_DECLS
+ 
+diff -up evolution-ews-3.28.5/src/server/e-soap-response.c.sync-category-list evolution-ews-3.28.5/src/server/e-soap-response.c
+--- evolution-ews-3.28.5/src/server/e-soap-response.c.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/server/e-soap-response.c	2019-10-24 09:39:08.342278207 +0200
+@@ -685,3 +685,29 @@ e_soap_response_dump_response (ESoapResp
+ 
+ 	return ret;
+ }
++
++gchar *
++e_soap_response_dump_parameter (ESoapResponse *response,
++				ESoapParameter *param)
++{
++	xmlBuffer *buffer;
++	gint len;
++	gchar *data;
++
++	g_return_val_if_fail (E_IS_SOAP_RESPONSE (response), NULL);
++	g_return_val_if_fail (param != NULL, NULL);
++
++	buffer = xmlBufferCreate ();
++	len = xmlNodeDump (buffer, response->priv->xmldoc, param, 0, 0);
++
++	if (len <= 0) {
++		xmlBufferFree (buffer);
++		return NULL;
++	}
++
++	data = g_strndup ((const gchar *) buffer->content, len);
++
++	xmlBufferFree (buffer);
++
++	return data;
++}
+diff -up evolution-ews-3.28.5/src/server/e-soap-response.h.sync-category-list evolution-ews-3.28.5/src/server/e-soap-response.h
+--- evolution-ews-3.28.5/src/server/e-soap-response.h.sync-category-list	2018-07-30 16:01:00.000000000 +0200
++++ evolution-ews-3.28.5/src/server/e-soap-response.h	2019-10-24 09:39:08.343278207 +0200
+@@ -101,6 +101,8 @@ ESoapParameter *
+ 						 const gchar *name);
+ gint		e_soap_response_dump_response	(ESoapResponse *response,
+ 						 FILE *buffer);
++gchar *		e_soap_response_dump_parameter	(ESoapResponse *response,
++						 ESoapParameter *param);
+ 
+ G_END_DECLS
+ 

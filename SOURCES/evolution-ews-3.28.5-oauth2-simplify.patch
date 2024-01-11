@@ -1,0 +1,119 @@
+From bf0f75de095dc7ecb7171ab61009fab2631b4bee Mon Sep 17 00:00:00 2001
+From: Luca Boccassi <luca.boccassi@microsoft.com>
+Date: Tue, 2 Apr 2019 16:06:35 +0200
+Subject: [PATCH] M!1 - Simplify OAuth2 for outlook.office365.com server
+
+Two changes:
+1) preset default tenant to "common"
+2) do not pass 'scope' parameter in the requests, which is optional
+   and can cause errors like:
+   error:invalid_request description:AADSTS65002:
+   Consent between first party applications and resources must be
+   configured via preauthorization.
+
+Closes https://gitlab.gnome.org/GNOME/evolution-ews/merge_requests/1
+---
+ CMakeLists.txt                                |  2 +-
+ src/configuration/e-mail-config-ews-backend.c | 15 +++------------
+ src/server/e-oauth2-service-office365.c       | 17 -----------------
+ 3 files changed, 4 insertions(+), 30 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e8ea9875..dbc58832 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -180,7 +180,7 @@ endif(ENABLE_TESTS)
+ add_printable_variable(WITH_OFFICE365_TENANT "Office365.com OAuth 2.0 tenant" "")
+ 
+ if(WITH_OFFICE365_TENANT STREQUAL "")
+-	set(WITH_OFFICE365_TENANT "")
++	set(WITH_OFFICE365_TENANT "common")
+ endif(WITH_OFFICE365_TENANT STREQUAL "")
+ 
+ add_printable_variable(WITH_OFFICE365_CLIENT_ID "Office365.com OAuth 2.0 client ID" "")
+diff --git a/src/configuration/e-mail-config-ews-backend.c b/src/configuration/e-mail-config-ews-backend.c
+index fbf341b2..e62d3922 100644
+--- a/src/configuration/e-mail-config-ews-backend.c
++++ b/src/configuration/e-mail-config-ews-backend.c
+@@ -348,9 +348,9 @@ mail_config_ews_backend_insert_widgets (EMailConfigServiceBackend *backend,
+ 		G_BINDING_SYNC_CREATE);
+ 
+ 	mail_config_ews_backend_set_oauth2_tooltip (widget, OFFICE365_TENANT,
+-		/* Translators: 'Tenant' here means a term used by Microsoft to identify a company or organization in an Office 365 world.
++		/* Translators: 'Tenant' here means a term used by Microsoft to identify a company or organization in an Office 365 world. Same for 'common', it's a default URL path.
+ 		   You probably do not want to translate it. More for example here: https://powerbi.microsoft.com/en-us/blog/what-is-a-tenant/ */
+-		_("There is not set any default tenant"),
++		_("Default tenant is “common“"),
+ 		/* Translators: 'Tenant' here means a term used by Microsoft to identify a company or organization in an Office 365 world.
+ 		   You probably do not want to translate it. More for example here: https://powerbi.microsoft.com/en-us/blog/what-is-a-tenant/ */
+ 		g_strdup_printf (_("Default tenant is “%s”"), OFFICE365_TENANT));
+@@ -586,23 +586,14 @@ mail_config_ews_backend_check_complete (EMailConfigServiceBackend *backend)
+ 	e_util_set_entry_issue_hint (priv->user_entry, correct ? NULL : _("User name cannot be empty"));
+ 
+ 	if (correct && camel_ews_settings_get_auth_mechanism (ews_settings) == EWS_AUTH_TYPE_OAUTH2) {
+-		const gchar *tenant, *client_id;
++		const gchar *client_id;
+ 
+ 		if (camel_ews_settings_get_override_oauth2 (ews_settings)) {
+-			tenant = camel_ews_settings_get_oauth2_tenant (ews_settings);
+ 			client_id = camel_ews_settings_get_oauth2_client_id (ews_settings);
+ 		} else {
+-			tenant = OFFICE365_TENANT;
+ 			client_id = OFFICE365_CLIENT_ID;
+ 		}
+ 
+-		correct = tenant && *tenant;
+-		complete = complete && correct;
+-
+-		/* Translators: 'Tenant' here means a term used by Microsoft to identify a company or organization in an Office 365 world.
+-		   You probably do not want to translate it. More for example here: https://powerbi.microsoft.com/en-us/blog/what-is-a-tenant/ */
+-		e_util_set_entry_issue_hint (priv->oauth2_tenant_entry, correct ? NULL : _("Tenant cannot be empty"));
+-
+ 		correct = client_id && *client_id;
+ 		complete = complete && correct;
+ 
+diff --git a/src/server/e-oauth2-service-office365.c b/src/server/e-oauth2-service-office365.c
+index 4be84f6f..d660458c 100644
+--- a/src/server/e-oauth2-service-office365.c
++++ b/src/server/e-oauth2-service-office365.c
+@@ -30,21 +30,6 @@
+ 
+ #define OFFICE365_RESOURCE "https://outlook.office.com"
+ 
+-#define OFFICE365_SCOPE "openid offline_access profile " \
+-	"Mail.ReadWrite " \
+-	"Mail.ReadWrite.Shared " \
+-	"Mail.Send " \
+-	"Mail.Send.Shared " \
+-	"Calendars.ReadWrite " \
+-	"Calendars.ReadWrite.Shared " \
+-	"Contacts.ReadWrite " \
+-	"Contacts.ReadWrite.Shared " \
+-	"Tasks.ReadWrite " \
+-	"Tasks.ReadWrite.Shared " \
+-	"MailboxSettings.ReadWrite " \
+-	"People.Read " \
+-	"User.ReadBasic.All"
+-
+ struct _EOAuth2ServiceOffice365Private
+ {
+ 	GMutex string_cache_lock;
+@@ -253,7 +238,6 @@ eos_office365_prepare_authentication_uri_query (EOAuth2Service *service,
+ 
+ 	e_oauth2_service_util_set_to_form (uri_query, "response_mode", "query");
+ 	e_oauth2_service_util_set_to_form (uri_query, "prompt", "login");
+-	e_oauth2_service_util_set_to_form (uri_query, "scope", OFFICE365_SCOPE);
+ 	e_oauth2_service_util_set_to_form (uri_query, "resource", OFFICE365_RESOURCE);
+ }
+ 
+@@ -321,7 +305,6 @@ eos_office365_prepare_refresh_token_form (EOAuth2Service *service,
+ {
+ 	g_return_if_fail (form != NULL);
+ 
+-	e_oauth2_service_util_set_to_form (form, "scope", OFFICE365_SCOPE);
+ 	e_oauth2_service_util_set_to_form (form, "resource", OFFICE365_RESOURCE);
+ 	e_oauth2_service_util_set_to_form (form, "redirect_uri", e_oauth2_service_get_redirect_uri (service, source));
+ }
+-- 
+GitLab
+
